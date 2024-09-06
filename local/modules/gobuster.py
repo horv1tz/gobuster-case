@@ -3,6 +3,7 @@ import asyncio
 import subprocess
 import logging
 import re
+import sqlite3
 from urllib.parse import urlparse
 
 # Configure logging
@@ -72,7 +73,7 @@ async def scan_url_by_dir(url: str) -> dict:
     """
     Asynchronous function to perform scanning using Gobuster.
     Args:
-        url: URL to scan.
+        url: URL to scan.            
     Returns:
         return_data: Dictionary with logs and links.
     """
@@ -84,7 +85,7 @@ async def scan_url_by_dir(url: str) -> dict:
 
         # Execute gobuster command
         process = await asyncio.create_subprocess_shell(
-            f'./gobuster dir -u {url} -w wordlist.txt -t 50',
+            f'./gobuster dir -u https://{url} -w wordlist.txt -t 50 --timeout 60s',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
@@ -107,8 +108,8 @@ async def scan_url_by_dir(url: str) -> dict:
             logs = ""
             links = []
 
-        # Save links to domains.txt
-        save_to_file(links, 'domains.txt')
+        # Save links to SQLite database
+        save_to_database(links)
 
         return {
             'logs': logs,
@@ -134,8 +135,7 @@ def parse_log_file(log_file_path: str) -> list:
     links = []
     protocol = ''
     host = ''
-    method = ''
-
+    
     try:
         with open(log_file_path, 'r') as log_file:
             lines = log_file.readlines()
@@ -157,7 +157,9 @@ def parse_log_file(log_file_path: str) -> list:
                 parts = line.split()
                 if len(parts) > 1:
                     path = parts[0].strip()
-                    links.append({'protocol': protocol, 'host': host, 'path': path})
+                    status = parts[2].replace('(Status:', '').replace(')', '').strip()
+                    size = parts[4].replace('[Size:', '').replace(']', '').strip()
+                    links.append({'protocol': protocol, 'host': host, 'path': path, 'status': status, 'size': size})
 
         logging.info(f"Extracted {len(links)} links from app.log.")
     except Exception as e:
@@ -166,19 +168,56 @@ def parse_log_file(log_file_path: str) -> list:
 
     return links
 
-def save_to_file(data: list, file_path: str):
+def save_to_database(data: list):
     """
-    Function to save data to a file.
+    Function to save data to SQLite database.
     Args:
         data: Data to save.
-        file_path: Path to the file.
     """
     try:
-        with open(file_path, 'w') as f:
-            for entry in data:
-                # Save in the format: protocol - host - method - path
-                f.write(f"{entry['protocol']} - {entry['host']} - {entry['path']}\n")
-        logging.info(f"Data successfully saved to {file_path}.")
+        conn = sqlite3.connect('domains.db')
+        cursor = conn.cursor()
+
+        # Create tables if they don't exist
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS hosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE,
+                host TEXT UNIQUE
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS paths (
+                id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE,
+                host_id INTEGER,
+                path TEXT,
+                size TEXT,
+                status TEXT,
+                FOREIGN KEY(host_id) REFERENCES hosts(id)
+            )
+        ''')
+
+        # Insert or ignore host
+        for entry in data:
+            # First, check if host already exists
+            cursor.execute('SELECT id FROM hosts WHERE host = ?', (entry['host'],))
+            host_result = cursor.fetchone()
+            
+            if host_result:
+                host_id = host_result[0]  # Get existing host ID
+            else:
+                # Insert new host and get the inserted ID
+                cursor.execute('INSERT INTO hosts (host) VALUES (?)', (entry['host'],))
+                host_id = cursor.lastrowid
+
+            # Insert path
+            cursor.execute('''
+                INSERT INTO paths (host_id, path, size, status)
+                VALUES (?, ?, ?, ?)
+            ''', (host_id, entry['path'], entry['size'], entry['status']))
+
+        conn.commit()
+        conn.close()
+        logging.info("Data successfully saved to SQLite database.")
     except Exception as e:
-        logging.error(f"Error saving data to file {file_path}: {e}")
-        print(f"Error saving data to file {file_path}: {e}")
+        logging.error(f"Error saving data to database: {e}")
+        print(f"Error saving data to database: {e}")

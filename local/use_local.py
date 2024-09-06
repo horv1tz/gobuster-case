@@ -1,10 +1,16 @@
 from modules.gobuster import process_wordlist, scan_url_by_dir
 import asyncio
 
-if __name__ == "__main__":
+async def scan_hosts():
     # Process wordlist to find duplicates and optionally clean it
     # process_wordlist('wordlist.txt')
-    
-    # Start the scanning (example)
-    url_to_scan = "https://dvorfs.com"
-    asyncio.run(scan_url_by_dir(url_to_scan))
+
+    # Open the hosts file and read each line one by one
+    with open('hosts', 'r') as hosts:
+        for line in hosts:
+            host = line.strip()  # Удаляем пробелы и символы перевода строки
+            print(f"Scanning {host}...")
+            await scan_url_by_dir(host)  # Асинхронно выполняем задачу для каждого хоста
+
+if __name__ == "__main__":
+    asyncio.run(scan_hosts())
