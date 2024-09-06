@@ -6,23 +6,28 @@ import re
 import sqlite3
 from urllib.parse import urlparse
 
-# Configure logging
+# Configure logging to log both to file and console
 logging.basicConfig(
-    filename='gobuster_module.log',
-    filemode='a',
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG
+    handlers=[
+        logging.FileHandler('gobuster_module.log', mode='a'),
+        logging.StreamHandler()  # Log to console
+    ]
 )
 
 def process_wordlist(file_path: str) -> list:
     """
-    Function to find duplicates in the wordlist and optionally clean it by removing duplicates and empty lines.
+    Process the wordlist file to find duplicates and optionally clean it.
+    
     Args:
         file_path: Path to the wordlist file.
+    
     Returns:
-        cleaned_words: List of unique words if cleaned, otherwise an empty list.
+        List of unique words if cleaned, otherwise an empty list.
     """
     try:
+        # Read words from the file
         with open(file_path, 'r') as f:
             words = f.readlines()
 
@@ -33,10 +38,10 @@ def process_wordlist(file_path: str) -> list:
             if word:
                 word_count[word] = word_count.get(word, 0) + 1
 
-        # Find duplicates (words with more than one occurrence)
+        # Identify duplicates
         duplicates = [word for word, count in word_count.items() if count > 1]
 
-        # Log duplicates
+        # Log and print duplicates if found
         if duplicates:
             logging.info(f"Found the following duplicates in the wordlist: {', '.join(duplicates)}")
             print("Found the following duplicates in the wordlist:")
@@ -46,14 +51,14 @@ def process_wordlist(file_path: str) -> list:
             logging.info("No duplicates found in the wordlist.")
             print("No duplicates found in the wordlist.")
 
-        # Ask the user whether to perform the cleaning
+        # Prompt user to clean the wordlist
         user_input = input("Do you want to clean the wordlist and remove duplicates? (yes/no): ").strip().lower()
         if user_input not in ['yes', 'y']:
             logging.info("User chose not to clean the wordlist.")
             print("Skipping wordlist cleaning.")
             return []
 
-        # Remove empty lines and duplicates
+        # Remove duplicates and empty lines
         cleaned_words = list(set([word.strip() for word in words if word.strip()]))
         
         # Overwrite the file with cleaned data
@@ -71,11 +76,13 @@ def process_wordlist(file_path: str) -> list:
 
 async def scan_url_by_dir(url: str) -> dict:
     """
-    Asynchronous function to perform scanning using Gobuster.
+    Perform an asynchronous directory scan using Gobuster.
+    
     Args:
-        url: URL to scan.            
+        url: URL to scan.
+    
     Returns:
-        return_data: Dictionary with logs and links.
+        Dictionary with logs and links extracted from the scan.
     """
     try:
         # Extract protocol and host from the URL
@@ -83,7 +90,7 @@ async def scan_url_by_dir(url: str) -> dict:
         host = parsed_url.netloc
         protocol = parsed_url.scheme
 
-        # Execute gobuster command
+        # Run Gobuster command asynchronously
         process = await asyncio.create_subprocess_shell(
             f'./gobuster dir -u https://{url} -w wordlist.txt -t 50 --timeout 60s',
             stdout=asyncio.subprocess.PIPE,
@@ -92,12 +99,13 @@ async def scan_url_by_dir(url: str) -> dict:
         
         stdout, stderr = await process.communicate()
 
-        # Save the console output to app.log
+        # Save console output to log file
         with open('app.log', 'w') as output_file:
             output_file.write(stdout.decode())
             output_file.write("\n")
             output_file.write(stderr.decode())
 
+        # Check process exit code and parse results
         if process.returncode == 0:
             logs = stdout.decode()
             links = parse_log_file('app.log')
@@ -108,7 +116,7 @@ async def scan_url_by_dir(url: str) -> dict:
             logs = ""
             links = []
 
-        # Save links to SQLite database
+        # Save extracted links to database
         save_to_database(links)
 
         return {
@@ -126,17 +134,20 @@ async def scan_url_by_dir(url: str) -> dict:
 
 def parse_log_file(log_file_path: str) -> list:
     """
-    Function to parse the app.log file and extract host, method, and paths.
+    Parse the log file to extract protocol, host, and path information.
+    
     Args:
         log_file_path: Path to the log file.
+    
     Returns:
-        links: List of dictionaries with protocol, host, method, and path.
+        List of dictionaries with protocol, host, method, and path.
     """
     links = []
     protocol = ''
     host = ''
     
     try:
+        # Read log file content
         with open(log_file_path, 'r') as log_file:
             lines = log_file.readlines()
         
@@ -144,7 +155,7 @@ def parse_log_file(log_file_path: str) -> list:
         ansi_escape = re.compile(r'\x1B[@-_][0-?]*[ -/]*[@-~]')
         clean_lines = [ansi_escape.sub('', line) for line in lines]
         
-        # Extract the URL and Method from the log file
+        # Extract URLs, protocols, and paths from log lines
         for line in clean_lines:
             if "[+] Url:" in line:
                 url = line.split(":", 1)[1].strip()
@@ -152,7 +163,6 @@ def parse_log_file(log_file_path: str) -> list:
                 protocol = parsed_url.scheme
                 host = parsed_url.netloc
 
-            # Extract all paths
             if line.startswith('/'):
                 parts = line.split()
                 if len(parts) > 1:
@@ -170,9 +180,10 @@ def parse_log_file(log_file_path: str) -> list:
 
 def save_to_database(data: list):
     """
-    Function to save data to SQLite database.
+    Save extracted data to the SQLite database.
+    
     Args:
-        data: Data to save.
+        data: List of dictionaries containing the data to save.
     """
     try:
         conn = sqlite3.connect('domains.db')
@@ -189,6 +200,7 @@ def save_to_database(data: list):
             CREATE TABLE IF NOT EXISTS paths (
                 id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE,
                 host_id INTEGER,
+                protocol TEXT,
                 path TEXT,
                 size TEXT,
                 status TEXT,
@@ -198,22 +210,20 @@ def save_to_database(data: list):
 
         # Insert or ignore host
         for entry in data:
-            # First, check if host already exists
             cursor.execute('SELECT id FROM hosts WHERE host = ?', (entry['host'],))
             host_result = cursor.fetchone()
             
             if host_result:
-                host_id = host_result[0]  # Get existing host ID
+                host_id = host_result[0]  # Use existing host ID
             else:
-                # Insert new host and get the inserted ID
                 cursor.execute('INSERT INTO hosts (host) VALUES (?)', (entry['host'],))
                 host_id = cursor.lastrowid
 
-            # Insert path
+            # Insert path with protocol information
             cursor.execute('''
-                INSERT INTO paths (host_id, path, size, status)
-                VALUES (?, ?, ?, ?)
-            ''', (host_id, entry['path'], entry['size'], entry['status']))
+                INSERT INTO paths (host_id, protocol, path, size, status)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (host_id, entry['protocol'], entry['path'], entry['size'], entry['status']))
 
         conn.commit()
         conn.close()
